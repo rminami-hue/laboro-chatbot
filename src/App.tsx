@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import './App.css';
 import { languages } from './languages';
 import type { Language, Message, Action } from './types';
+import { analyzeUserQuery } from './services/gemini';
 
 function App() {
     const [currentLanguage, setCurrentLanguage] = useState<Language>('vi');
@@ -247,7 +248,7 @@ function App() {
         addMessage(invalidMessages[currentLanguage] || invalidMessages.vi, 'bot');
     };
 
-    const handleInput = () => {
+    const handleInput = async () => {
         const text = inputValue.trim();
         if (!text) return;
 
@@ -258,42 +259,114 @@ function App() {
         if (/^\d+$/.test(halfWidthText)) {
             const menuNumber = parseInt(halfWidthText);
             selectMenuByNumber(menuNumber);
-        } else {
-            addMessage(text, 'user');
-            // キーワードマッチング（簡易版）
-            const lowerText = text.toLowerCase();
-            const keywords: Record<string, Record<string, string[]>> = {
-                salary: {
-                    vi: ['lương', 'bảng lương', 'tiền lương', 'sổ lương'],
-                    ja: ['給与', '給与明細', '賃金', '賃金台帳'],
-                    en: ['salary', 'payslip', 'wage', 'pay'],
-                    ne: ['तलब', 'तलबको बिल', 'वेतन']
-                },
-                attendance: {
-                    vi: ['nghỉ', 'muộn', 'chấm công', 'vắng mặt'],
-                    ja: ['欠勤', '遅刻', '出勤', '休み'],
-                    en: ['absence', 'late', 'attendance', 'absent'],
-                    ne: ['अनुपस्थिति', 'ढिलो', 'उपस्थिति']
-                }
-            };
+            setInputValue('');
+            return;
+        }
 
-            const langKeywords = keywords.salary[currentLanguage] || keywords.salary.vi;
-            if (langKeywords.some(kw => lowerText.includes(kw))) {
-                selectMenuItem('salary', 0);
-            } else if (keywords.attendance[currentLanguage]?.some(kw => lowerText.includes(kw))) {
-                selectMenuItem('attendance', 0);
-            } else {
-                const notUnderstandMessages: Record<string, string> = {
-                    vi: 'Xin lỗi, tôi không hiểu câu hỏi của bạn. Vui lòng chọn từ menu hoặc liên hệ với điều phối viên.',
-                    ja: '申し訳ございませんが、ご質問を理解できませんでした。メニューから選択するか、コーディネーターにお問い合わせください。',
-                    en: 'Sorry, I do not understand your question. Please select from the menu or contact the coordinator.',
-                    ne: 'माफ गर्नुहोस्, म तपाईंको प्रश्न बुझ्न सक्दिन। कृपया मेनुबाट छान्नुहोस् वा समन्वयकलाई सम्पर्क गर्नुहोस्।'
+        // ユーザーメッセージを追加
+        addMessage(text, 'user');
+        
+        // キーワードマッチング（簡易版）を試行
+        const lowerText = text.toLowerCase();
+        const keywords: Record<string, Record<string, string[]>> = {
+            salary: {
+                vi: ['lương', 'bảng lương', 'tiền lương', 'sổ lương'],
+                ja: ['給与', '給与明細', '賃金', '賃金台帳'],
+                en: ['salary', 'payslip', 'wage', 'pay'],
+                ne: ['तलब', 'तलबको बिल', 'वेतन']
+            },
+            attendance: {
+                vi: ['nghỉ', 'muộn', 'chấm công', 'vắng mặt'],
+                ja: ['欠勤', '遅刻', '出勤', '休み'],
+                en: ['absence', 'late', 'attendance', 'absent'],
+                ne: ['अनुपस्थिति', 'ढिलो', 'उपस्थिति']
+            }
+        };
+
+        const langKeywords = keywords.salary[currentLanguage] || keywords.salary.vi;
+        let matched = false;
+
+        if (langKeywords.some(kw => lowerText.includes(kw))) {
+            selectMenuItem('salary', 0);
+            matched = true;
+        } else if (keywords.attendance[currentLanguage]?.some(kw => lowerText.includes(kw))) {
+            selectMenuItem('attendance', 0);
+            matched = true;
+        }
+
+        // キーワードマッチングで判定できない場合、Gemini APIを使用
+        if (!matched) {
+            try {
+                // ローディングメッセージを表示
+                const loadingMessages: Record<string, string> = {
+                    vi: 'Đang phân tích câu hỏi của bạn...',
+                    ja: 'ご質問を分析しています...',
+                    en: 'Analyzing your question...',
+                    ne: 'तपाईंको प्रश्न विश्लेषण गर्दै...'
                 };
-                addMessage(notUnderstandMessages[currentLanguage] || notUnderstandMessages.vi, 'bot');
+                const loadingMsg = loadingMessages[currentLanguage] || loadingMessages.ja;
+                addMessage(loadingMsg, 'bot');
+
+                const geminiResponse = await analyzeUserQuery(text, currentLanguage, lang.categories);
+                
+                if (geminiResponse.categoryKey && geminiResponse.itemIndex !== undefined) {
+                    // Geminiが適切なカテゴリとメニュー項目を提案した場合
+                    const category = lang.categories[geminiResponse.categoryKey];
+                    if (category && category.items[geminiResponse.itemIndex]) {
+                        // ローディングメッセージを削除してから正しい回答を表示
+                        setMessages(prev => prev.slice(0, -1));
+                        selectMenuItem(geminiResponse.categoryKey, geminiResponse.itemIndex);
+                    } else {
+                        // ローディングメッセージを削除してからデフォルトメッセージを表示
+                        setMessages(prev => prev.slice(0, -1));
+                        showDefaultMessage();
+                    }
+                } else {
+                    // Geminiがデフォルトメッセージを推奨した場合
+                    setMessages(prev => prev.slice(0, -1));
+                    if (geminiResponse.suggestedMessage) {
+                        addMessage(geminiResponse.suggestedMessage, 'bot');
+                    } else {
+                        showDefaultMessage();
+                    }
+                }
+            } catch (error) {
+                console.error('Error analyzing query with Gemini:', error);
+                // エラーが発生した場合はローディングメッセージを削除してデフォルトメッセージを表示
+                setMessages(prev => prev.slice(0, -1));
+                showDefaultMessage();
             }
         }
         
         setInputValue('');
+    };
+
+    const showDefaultMessage = () => {
+        const notUnderstandMessages: Record<string, string> = {
+            vi: 'Xin lỗi, tôi không hiểu câu hỏi của bạn. Vui lòng chọn từ menu hoặc liên hệ với điều phối viên.',
+            ja: '申し訳ございませんが、ご質問を理解できませんでした。メニューから選択するか、コーディネーターにお問い合わせください。',
+            en: 'Sorry, I do not understand your question. Please select from the menu or contact the coordinator.',
+            ne: 'माफ गर्नुहोस्, म तपाईंको प्रश्न बुझ्न सक्दिन। कृपया मेनुबाट छान्नुहोस् वा समन्वयकलाई सम्पर्क गर्नुहोस्।'
+        };
+        const defaultActions: Action[] = [
+            { 
+                type: 'contact', 
+                text: currentLanguage === 'vi' ? '📞 Liên hệ điều phối viên' :
+                    currentLanguage === 'ja' ? '📞 コーディネーターに連絡' :
+                    currentLanguage === 'en' ? '📞 Contact coordinator' :
+                    '📞 समन्वयकलाई सम्पर्क', 
+                action: 'contactCoordinator' 
+            },
+            { 
+                type: 'home', 
+                text: currentLanguage === 'vi' ? '🏠 Về trang chủ' :
+                    currentLanguage === 'ja' ? '🏠 ホームに戻る' :
+                    currentLanguage === 'en' ? '🏠 Go home' :
+                    '🏠 घर फर्कनुहोस्', 
+                action: 'goHome' 
+            }
+        ];
+        addMessage(notUnderstandMessages[currentLanguage] || notUnderstandMessages.ja, 'bot', defaultActions);
     };
 
     const getCategoryMenuItems = () => {
