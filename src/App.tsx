@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import './App.css';
 import { languages } from './languages';
 import type { Language, Message, Action } from './types';
-import { analyzeUserQuery } from './services/gemini';
+import { analyzeUserQuery, generateResponse } from './services/gemini';
 
 function App() {
     const [currentLanguage, setCurrentLanguage] = useState<Language>('vi');
@@ -266,31 +266,58 @@ function App() {
         // ユーザーメッセージを追加
         addMessage(text, 'user');
         
-        // キーワードマッチング（簡易版）を試行
+        // キーワードマッチング（拡張版）を試行
         const lowerText = text.toLowerCase();
         const keywords: Record<string, Record<string, string[]>> = {
             salary: {
-                vi: ['lương', 'bảng lương', 'tiền lương', 'sổ lương'],
-                ja: ['給与', '給与明細', '賃金', '賃金台帳'],
-                en: ['salary', 'payslip', 'wage', 'pay'],
-                ne: ['तलब', 'तलबको बिल', 'वेतन']
+                vi: ['lương', 'bảng lương', 'tiền lương', 'sổ lương', 'lương tháng', 'tiền lương tháng', 'bảng lương tháng', 'lương tháng này', 'lương tháng trước'],
+                ja: ['給与', '給与明細', '賃金', '賃金台帳', '給料', '給料明細', '給与明細書', '給与明細が欲しい', '給料の明細', '給与明細を取得', '給与明細をダウンロード'],
+                en: ['salary', 'payslip', 'wage', 'pay', 'payroll', 'salary slip', 'payslip download', 'get payslip'],
+                ne: ['तलब', 'तलबको बिल', 'वेतन', 'तलबको बिल चाहिए']
+            },
+            visa: {
+                vi: ['visa', 'thẻ cư trú', 'gia hạn', 'gia hạn visa', 'gia hạn thẻ cư trú', 'thẻ cư trú sắp hết hạn', 'cập nhật visa'],
+                ja: ['ビザ', '在留カード', '更新', 'ビザ更新', '在留カード更新', '在留カードの更新', 'ビザの更新について', '在留カードの期限'],
+                en: ['visa', 'residence card', 'renewal', 'visa renewal', 'renew residence card', 'residence card expiring'],
+                ne: ['भिसा', 'निवास कार्ड', 'नवीकरण', 'भिसा नवीकरण', 'निवास कार्ड नवीकरण']
             },
             attendance: {
-                vi: ['nghỉ', 'muộn', 'chấm công', 'vắng mặt'],
-                ja: ['欠勤', '遅刻', '出勤', '休み'],
-                en: ['absence', 'late', 'attendance', 'absent'],
-                ne: ['अनुपस्थिति', 'ढिलो', 'उपस्थिति']
+                vi: ['nghỉ', 'muộn', 'chấm công', 'vắng mặt', 'đến muộn', 'nghỉ làm', 'nghỉ việc', 'đi muộn', 'sẽ muộn', 'có thể muộn'],
+                ja: ['欠勤', '遅刻', '出勤', '休み', '遅刻する', '遅刻するかもしれない', '遅刻します', '欠勤します', '休みます', '遅れます'],
+                en: ['absence', 'late', 'attendance', 'absent', 'will be late', 'might be late', 'going to be late', 'taking off'],
+                ne: ['अनुपस्थिति', 'ढिलो', 'उपस्थिति', 'ढिलो हुनेछ', 'ढिलो हुन सक्छ']
+            },
+            shift: {
+                vi: ['ca', 'ca làm việc', 'thay đổi ca', 'đổi ca', 'lịch làm việc'],
+                ja: ['シフト', 'シフト変更', '労働時間', 'シフトを変更', 'シフト変更したい'],
+                en: ['shift', 'work shift', 'change shift', 'shift change', 'working hours'],
+                ne: ['कामको समय', 'शिफ्ट', 'शिफ्ट परिवर्तन']
+            },
+            system: {
+                vi: ['cms', 'đăng nhập', 'mật khẩu', 'hệ thống', 'không đăng nhập được', 'quên mật khẩu'],
+                ja: ['cms', 'ログイン', 'パスワード', 'システム', 'ログインできない', 'パスワードを忘れた', 'ログインできない'],
+                en: ['cms', 'login', 'password', 'system', 'cannot login', 'forgot password'],
+                ne: ['cms', 'लगइन', 'पासवर्ड', 'प्रणाली', 'लगइन गर्न सक्दैन']
             }
         };
 
-        const langKeywords = keywords.salary[currentLanguage] || keywords.salary.vi;
         let matched = false;
+        let matchedCategory: string | null = null;
+        let matchedItemIndex = 0;
 
-        if (langKeywords.some(kw => lowerText.includes(kw))) {
-            selectMenuItem('salary', 0);
-            matched = true;
-        } else if (keywords.attendance[currentLanguage]?.some(kw => lowerText.includes(kw))) {
-            selectMenuItem('attendance', 0);
+        // 各カテゴリのキーワードをチェック
+        for (const [categoryKey, langKeywords] of Object.entries(keywords)) {
+            const keywordsForLang = langKeywords[currentLanguage] || langKeywords.vi || langKeywords.ja;
+            if (keywordsForLang && keywordsForLang.some(kw => lowerText.includes(kw))) {
+                matchedCategory = categoryKey;
+                matched = true;
+                break;
+            }
+        }
+
+        if (matched && matchedCategory) {
+            // カテゴリが見つかった場合、最初のメニュー項目を選択
+            selectMenuItem(matchedCategory, matchedItemIndex);
             matched = true;
         }
 
@@ -322,12 +349,43 @@ function App() {
                         showDefaultMessage();
                     }
                 } else {
-                    // Geminiがデフォルトメッセージを推奨した場合
+                    // Geminiがデフォルトメッセージを推奨した場合、または該当するカテゴリがない場合
                     setMessages(prev => prev.slice(0, -1));
+                    
+                    // フェーズ2: 該当しない質問に対して、より自然な回答を生成
                     if (geminiResponse.suggestedMessage) {
                         addMessage(geminiResponse.suggestedMessage, 'bot');
                     } else {
-                        showDefaultMessage();
+                        // Gemini APIで動的な回答を生成を試行
+                        try {
+                            const dynamicResponse = await generateResponse(text, currentLanguage);
+                            if (dynamicResponse) {
+                                const defaultActions: Action[] = [
+                                    { 
+                                        type: 'contact', 
+                                        text: currentLanguage === 'vi' ? '📞 Liên hệ điều phối viên' :
+                                            currentLanguage === 'ja' ? '📞 コーディネーターに連絡' :
+                                            currentLanguage === 'en' ? '📞 Contact coordinator' :
+                                            '📞 समन्वयकलाई सम्पर्क', 
+                                        action: 'contactCoordinator' 
+                                    },
+                                    { 
+                                        type: 'home', 
+                                        text: currentLanguage === 'vi' ? '🏠 Về trang chủ' :
+                                            currentLanguage === 'ja' ? '🏠 ホームに戻る' :
+                                            currentLanguage === 'en' ? '🏠 Go home' :
+                                            '🏠 घर फर्कनुहोस्', 
+                                        action: 'goHome' 
+                                    }
+                                ];
+                                addMessage(dynamicResponse, 'bot', defaultActions);
+                            } else {
+                                showDefaultMessage();
+                            }
+                        } catch (error) {
+                            console.error('Error generating dynamic response:', error);
+                            showDefaultMessage();
+                        }
                     }
                 }
             } catch (error) {
