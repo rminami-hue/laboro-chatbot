@@ -101,3 +101,4 @@ VITE_GEMINI_API_KEY=your_gemini_api_key
 ## ライセンス
 
 LABORO社内利用
+# 移管確認
